@@ -4,6 +4,10 @@
 *.swp
 *.swo
 
+# Claude Code (local-only, never upload — no Claude footprint on GitHub)
+CLAUDE.md
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -11,6 +15,7 @@ __pycache__/
 .pytest_cache/
 .env
 venv/
+.venv/
 
 # GCP credentials (NEVER commit)
 key.json
@@ -30,8 +35,12 @@ key.json
 week*/data/*.parquet
 *.parquet
 
+# Monitoring run outputs (uploaded as CI artifacts, not tracked)
+week*/metrics-*.json
+
 # Local-only scaffolding: symlinks that point data.py at the real Week 2 files
 week2/data/processed/
 
 # Report is submitted separately as a PDF, not tracked here
 week3/REPORT.md
+week4/REPORT.md
