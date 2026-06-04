@@ -13,6 +13,10 @@ on:
       - 'week4/scripts/**'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write   # the alert step opens an issue with the default GITHUB_TOKEN
+
 jobs:
   monitor:
     runs-on: ubuntu-latest
@@ -39,12 +43,14 @@ jobs:
       - name: Compute monitoring metrics
         id: metrics
         # Loads baseline + Feb 2-28 window, runs the 8 metrics, checks thresholds, writes
-        # metrics-*.json, and exits non-zero if any CRITICAL alert fires.
+        # metrics-*.json, and exits non-zero if any CRITICAL alert fires. continue-on-error
+        # keeps the job green: a detected drift is an alert (an issue), not a broken pipeline.
+        continue-on-error: true
         run: python scripts/compute_metrics.py
 
       - name: Detect drift patterns
         id: drift
-        if: always()   # informational log; run it even when the metrics step failed critical.
+        if: always()   # informational log; run it even when the metrics step flagged critical.
         run: python scripts/detect_drift.py
 
       - name: Upload metrics
@@ -56,7 +62,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Create alert issue if drift detected
-        if: failure()
+        if: steps.metrics.outcome == 'failure'   # critical alert raised by compute_metrics
         uses: actions/github-script@v7
         with:
           script: |
@@ -64,18 +70,18 @@ jobs:
             github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Drift alert — monitoring run ${context.runId}`,
+              title: `Drift alert: monitoring run ${context.runId}`,
               body: [
-                'The daily drift monitoring job fired a **CRITICAL** alert.',
+                'The daily drift monitoring job raised a **CRITICAL** alert.',
                 '',
                 `See the run log and metrics artifact for details: ${run}`,
                 '',
-                'Next steps: review which segments/features breached threshold, then assess',
+                'Next steps: review which segments or features breached threshold, then assess',
                 'whether the retraining trigger conditions are met (see week4/REPORT.md).'
               ].join('\n'),
               labels: ['drift-alert']
             })
 
       - name: Monitoring complete
-        if: success()
+        if: steps.metrics.outcome == 'success'
         run: echo "Drift monitoring complete - no critical alerts."
