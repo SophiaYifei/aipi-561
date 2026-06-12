@@ -1,7 +1,7 @@
 # Week 5 Report: Agent Architecture with LLM Tool Use
 
-Author: Yifei
-Course: AIPI 561 Operationalizing AI
+Author: Yifei  
+Course: AIPI 561 Operationalizing AI  
 Repo: https://github.com/SophiaYifei/aipi-561 (folder `week5/`)
 
 ## 1. What I built
@@ -71,7 +71,7 @@ lookup by ID, lookup by partial name, a name that does not exist, a call with
 no arguments, a multi-word policy search, a search with no matches, and expense
 queries for valid, differently-cased, and unknown roles.
 
-[SCREENSHOT 1: output of `python test_tools.py`]
+![Output of python test_tools.py](image/REPORT/1781234978782.png)
 
 ## 4. Agent end-to-end test
 
@@ -82,7 +82,7 @@ captured below the second LLM call happened to hit the free-tier rate limit
 twice, so the screenshot also shows the retry logic working: two 429 warnings,
 then a successful call and a normal answer.
 
-[SCREENSHOT 2: output of `python app_starter.py`]
+![Output of python app_starter.py, including the 429 retries](image/REPORT/1781235244978.png)
 
 ## 5. The 10 test queries
 
@@ -106,11 +106,11 @@ failure modes:
 The script sleeps 25 seconds between queries because the free tier allows only
 5 requests per minute and each agent query needs about two LLM calls.
 
-[SCREENSHOT 3: queries 1 to 4 from `python demo_queries.py`]
+![Queries 1 to 4 from python demo_queries.py](image/REPORT/1781235276570.png)
 
-[SCREENSHOT 4: queries 5 to 8]
+![Queries 5 to 8](image/REPORT/1781235297390.png)
 
-[SCREENSHOT 5: queries 9, 10 and the final metrics block]
+![Queries 9 and 10, and the final metrics block](image/REPORT/1781235421449.png)
 
 ## 6. Cost
 
