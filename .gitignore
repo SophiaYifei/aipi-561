@@ -43,3 +43,6 @@ week2/data/processed/
 
 # Report is submitted separately as a PDF, not tracked here
 week3/REPORT.md
+
+# Week 5 report source is local-only; the PDF is what gets submitted
+week5/REPORT.md
