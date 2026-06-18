@@ -95,14 +95,11 @@ A useful concrete result: an engineer can retrieve 21 of the 74 policy
 documents (the Public and Internal ones), while a manager can retrieve all 74,
 because 53 of the documents are Confidential.
 
-[SCREENSHOT 1: output of `python test_access_control.py` showing all offline
-tests passing]
+![1781760246264](image/REPORT/1781760246264.png)
 
 The original starter self-test still passes too, so the basic grading checks
 hold:
-
-[SCREENSHOT 2: output of `python access_control_starter.py` showing
-"All tests passed!"]
+![1781760180662](image/REPORT/1781760180662.png)
 
 ## 5. End-to-end demo with the live agent
 
@@ -115,20 +112,20 @@ rate-limit and budget demos at the end use no LLM.
 engineer and then as HR. The engineer gets a redacted answer because the tool
 returned `[REDACTED]` for the salary column; HR gets the real figure.
 
-[SCREENSHOT 3: queries A1 (engineer, redacted) and A2 (HR, full)]
+![1781822029680](image/REPORT/1781822029680.png)
 
 **B. Happy path.** A normal policy question ("How many PTO days do employees get
 per year?") still works for an engineer, to show the guardrails do not break
 ordinary use.
 
-[SCREENSHOT 4: query B answering normally with cost and remaining budget]
+![1781822079240](image/REPORT/1781822079240.png)
 
 **C and D. Blocked requests.** I exhaust the per-minute limit for one user and
 the monthly budget for another, then show each query returning a structured
 error (`Rate limit exceeded`, `Budget exceeded`) with no LLM call. The run ends
 by printing the tail of the audit log and the agent metrics.
 
-[SCREENSHOT 5: rate-limit block, budget block, and the audit-log tail]
+![1781822095986](image/REPORT/1781822095986.png)
 
 ## 6. What I observed
 
