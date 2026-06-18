@@ -1,16 +1,29 @@
 """
-Week 6: Access Control, Rate Limiting & Cost Enforcement Starter Template
+Week 6: Access Control, Rate Limiting & Cost Enforcement
 
-Implement three guardrails:
-1. AccessController - role-based document/field access control
+Three guardrails that run BEFORE and AROUND the Week 5 agent:
+1. AccessController - role-based document/field access control + audit log
 2. RateLimiter - limit queries per minute per user
-3. CostEnforcer - enforce budget limits per role
+3. CostEnforcer - enforce monthly budget limits per role
+
+Design notes (choices beyond the bare starter):
+- redact_response keeps the field *name* visible and replaces only the value
+  with [REDACTED], so a user can tell that something was withheld rather than
+  silently disappearing.
+- The agent also enforces access at retrieval time (field-level redaction in
+  the employee tool, document-level filtering in the policy tool) so the LLM
+  never even sees data the role is not allowed to read. redact_response then
+  acts as a second, defense-in-depth layer on the final answer.
+- CostEnforcer.can_afford_query takes an optional role, because a brand-new
+  user has no spending record yet and therefore no budget to look up. This is
+  the approach the starter hints at in its TODO.
 """
 
 import json
 import logging
-from typing import Dict, Any, List
-from datetime import datetime
+import re
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
 from time import time
 
 logging.basicConfig(level=logging.INFO)
@@ -18,89 +31,143 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# TASK 1: Implement AccessController
+# TASK 1: AccessController
 # ============================================================================
 
 
 class AccessController:
-    """Enforce role-based access control."""
+    """Enforce role-based access control over documents and fields."""
+
+    # Value patterns reused when redacting free-text answers.
+    _MONEY = r"\$\s?\d[\d,]*(?:\.\d+)?"
+    _SSN = r"\b\d{3}-\d{2}-\d{4}\b"
 
     def __init__(self, access_policy_path: str):
-        """Load access control policy.
-
-        TODO:
-        1. Load JSON policy from access_policy_path
-        2. Store in self.policy
-        3. Initialize audit_log list for tracking access attempts
-        """
-        # TODO: implement
-        self.policy = {}
-        self.audit_log = []
+        """Load the access policy JSON and start an empty audit log."""
+        try:
+            with open(access_policy_path) as f:
+                self.policy = json.load(f)
+        except Exception as e:
+            # Fail safe: with no policy loaded, every check below denies.
+            logger.error(f"Failed to load access policy: {e}")
+            self.policy = {}
+        self.audit_log: List[Dict[str, Any]] = []
 
     def can_view_document(self, role: str, document: Dict[str, Any]) -> bool:
-        """Check if role can view document based on sensitivity level.
-
-        TODO: Implement document visibility rules
-        - Check document's sensitivity level (Public/Internal/Confidential/Restricted)
-        - Check if role has permission for that sensitivity
-        - Look up self.policy["document_access"][sensitivity] to get the list of roles allowed
-        - Example:
-          * public → all roles can view
-          * internal → engineer, manager, hr, finance, executive
-          * confidential → manager, hr, finance, executive
-          * restricted → hr, executive only
-        """
-        # TODO: implement
-        return False
+        """Check if a role may view a document given its sensitivity level."""
+        sensitivity = document.get("sensitivity")
+        access = self.policy.get("document_access", {})
+        # Unknown / missing sensitivity is treated as not-allowed (fail safe).
+        if sensitivity not in access:
+            return False
+        return role in access[sensitivity]
 
     def can_view_field(self, role: str, field_name: str) -> bool:
-        """Check if role can view a sensitive field.
+        """Check if a role may view a field.
 
-        TODO: Check self.policy["sensitive_fields"]
-        - Look up field in policy
-        - Check if role is in visibility list
-        - Example: salary field visible to ["manager", "hr"] only
+        A field that is not listed in sensitive_fields is not sensitive, so it
+        is visible to everyone. A listed field is visible only to the roles in
+        its visibility list.
         """
-        # TODO: implement
-        return False
+        sensitive = self.policy.get("sensitive_fields", {})
+        if field_name not in sensitive:
+            return True
+        return role in sensitive[field_name].get("visibility", [])
 
     def redact_response(self, role: str, response: str) -> str:
-        """Redact sensitive fields from response.
+        """Redact the values of sensitive fields the role cannot view.
 
-        TODO: Find and replace sensitive fields
-        1. Identify which fields role cannot view
-        2. Use regex to find those fields in response
-        3. Replace values with "[REDACTED]"
-        4. Return modified response
+        The field name is kept and only the value is replaced with [REDACTED],
+        so the reader can see that something was withheld.
         """
-        # TODO: implement
-        return response
+        if not response:
+            return response
 
-    def log_access(self, role: str, resource: str, allowed: bool, field: str = None):
-        """Log access attempt for audit trail.
+        sensitive = self.policy.get("sensitive_fields", {})
+        redacted = response
+        for field, meta in sensitive.items():
+            if self.can_view_field(role, field):
+                continue
 
-        TODO: Append to audit_log dict with:
-        - timestamp (use datetime.utcnow().isoformat())
-        - role
-        - resource
-        - field (if applicable)
-        - allowed (True/False)
-        """
-        # TODO: implement
-        pass
+            # Keywords that may introduce the field in prose.
+            keywords = {field, meta.get("description", "")}
+            if field == "ssn":
+                keywords.add("social security")
+            if field == "compensation":
+                keywords.update({"bonus", "stock", "stock options", "equity"})
+            if field == "performance_review":
+                keywords.update({"performance review", "performance rating", "rating"})
+            keywords = [re.escape(k) for k in keywords if k and len(k) > 2]
+
+            value = self._SSN if field == "ssn" else self._MONEY
+
+            for kw in keywords:
+                # "<keyword> ... <value>"  -> keep keyword, redact the value.
+                pattern = rf"(?i)({kw}[^\n]{{0,30}}?)({value})"
+                redacted = re.sub(pattern, r"\1[REDACTED]", redacted)
+
+            # SSNs are unambiguous, so scrub any that remain regardless of
+            # surrounding text.
+            if field == "ssn":
+                redacted = re.sub(self._SSN, "[REDACTED]", redacted)
+
+            if redacted != response:
+                self.log_access(role, "response", allowed=False, field=field)
+
+        return redacted
+
+    def log_access(
+        self, role: str, resource: str, allowed: bool, field: str = None
+    ) -> None:
+        """Append an access attempt to the audit log."""
+        self.audit_log.append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "role": role,
+                "resource": resource,
+                "field": field,
+                "allowed": allowed,
+            }
+        )
+        # Keep the log bounded so a long-running process does not grow forever.
+        if len(self.audit_log) > 10000:
+            self.audit_log = self.audit_log[-5000:]
 
     def filter_documents(
         self, role: str, documents: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Filter documents based on role permissions.
+        """Return only the documents a role may view, logging each decision."""
+        visible = []
+        for doc in documents:
+            allowed = self.can_view_document(role, doc)
+            resource = doc.get("id") or doc.get("title") or "document"
+            self.log_access(role, resource, allowed)
+            if allowed:
+                visible.append(doc)
+        return visible
 
-        TODO: Loop through documents
-        1. For each document, call can_view_document(role, doc)
-        2. Log the access attempt
-        3. Keep only documents role can view
+    def redact_employee_fields(
+        self, role: str, employee: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Redact sensitive columns of a structured employee record.
+
+        Used at retrieval time so the LLM never sees values the role cannot
+        read. DB columns are mapped onto the policy's sensitive_fields.
         """
-        # TODO: implement
-        return documents
+        # DB column -> policy sensitive_field key.
+        column_to_field = {
+            "salary": "salary",
+            "ssn": "ssn",
+            "address": "address",
+            "stock_options": "compensation",
+            "bonus_eligible": "compensation",
+        }
+        safe = dict(employee)
+        for column, field in column_to_field.items():
+            if column in safe and not self.can_view_field(role, field):
+                safe[column] = "[REDACTED]"
+                self.log_access(role, f"employee.{column}", allowed=False, field=field)
+        return safe
 
     def get_audit_log(self) -> List[Dict[str, Any]]:
         """Return audit log entries."""
@@ -108,142 +175,100 @@ class AccessController:
 
 
 # ============================================================================
-# TASK 2: Implement RateLimiter
+# TASK 2: RateLimiter
 # ============================================================================
 
 
 class RateLimiter:
-    """Rate limit queries per user per minute."""
+    """Rate limit queries per user using a sliding 60-second window."""
 
     def __init__(self, max_queries_per_minute: int = 30):
-        """Initialize rate limiter.
-
-        TODO: Store max limit and initialize per-user query tracking
-        """
         self.max_queries_per_minute = max_queries_per_minute
-        self.user_query_times = {}  # {user_id: [timestamps...]}
+        self.user_query_times: Dict[str, List[float]] = {}
+
+    def _recent(self, user_id: str) -> List[float]:
+        """Return (and store back) only this user's timestamps within 60s."""
+        cutoff = time() - 60
+        recent = [t for t in self.user_query_times.get(user_id, []) if t > cutoff]
+        self.user_query_times[user_id] = recent
+        return recent
 
     def is_allowed(self, user_id: str) -> bool:
-        """Check if user can make another query.
-
-        TODO: Implement rate limiting
-        1. Get current time
-        2. For user_id, get all query times from last 60 seconds
-        3. Count queries in that window
-        4. If count < max_queries_per_minute, allow and record timestamp
-        5. Otherwise, deny
-
-        Return: True if allowed, False if rate limit exceeded
-        """
-        # TODO: implement
-        return True
+        """Allow and record a query if under the limit, else deny."""
+        recent = self._recent(user_id)
+        if len(recent) < self.max_queries_per_minute:
+            recent.append(time())
+            return True
+        return False
 
     def get_remaining_queries(self, user_id: str) -> int:
-        """Get remaining queries for user in current minute.
-
-        TODO: Calculate remaining queries
-        1. Get queries in last 60 seconds
-        2. Return (max - count) or 0 if negative
-        """
-        # TODO: implement
-        return self.max_queries_per_minute
+        """Queries the user can still make in the current minute."""
+        recent = self._recent(user_id)
+        return max(0, self.max_queries_per_minute - len(recent))
 
 
 # ============================================================================
-# TASK 3: Implement CostEnforcer
+# TASK 3: CostEnforcer
 # ============================================================================
 
 
 class CostEnforcer:
-    """Enforce cost limits per user/role."""
+    """Enforce monthly budget limits per role."""
+
+    DEFAULT_BUDGETS = {
+        "engineer": 100.0,
+        "manager": 500.0,
+        "hr": 200.0,
+        "finance": 500.0,
+        "executive": 1000.0,
+    }
 
     def __init__(self, policy_path: str = None):
-        """Initialize cost enforcement.
+        self.role_budgets = dict(self.DEFAULT_BUDGETS)
+        if policy_path:
+            try:
+                with open(policy_path) as f:
+                    self.role_budgets.update(json.load(f))
+            except Exception as e:
+                logger.error(f"Failed to load budget policy: {e}")
+        # {user_id: {"role": str, "total": float}}
+        self.user_spending: Dict[str, Dict[str, Any]] = {}
 
-        TODO: Set up role budgets (monthly limits)
-        - engineer: $100
-        - manager: $500
-        - hr: $200
-        - finance: $500
-        - executive: $1000
+    def add_cost(self, user_id: str, role: str, cost: float) -> None:
+        """Record cost against a user's running total."""
+        entry = self.user_spending.setdefault(user_id, {"role": role, "total": 0.0})
+        entry["role"] = role  # keep the latest role on record
+        entry["total"] += cost
 
-        Also initialize user_spending dict to track per-user spending
+    def _budget_for(self, user_id: str, role: Optional[str]) -> float:
+        """Resolve a user's monthly budget from their recorded or passed role."""
+        recorded = self.user_spending.get(user_id, {}).get("role")
+        resolved = recorded or role or "engineer"
+        return self.role_budgets.get(resolved, 0.0)
+
+    def can_afford_query(
+        self, user_id: str, estimated_cost: float, role: str = None
+    ) -> bool:
+        """True if the estimated cost fits in the user's remaining budget.
+
+        A brand-new user has no spending record, so their role cannot be
+        looked up; pass ``role`` for them (the agent supplies user_role). If
+        neither is available we fall back to the smallest budget (engineer).
         """
-        # TODO: implement
-        self.role_budgets = {}
-        self.user_spending = {}  # {user_id: {"role": "engineer", "total": 50.0}}
+        budget = self._budget_for(user_id, role)
+        spent = self.user_spending.get(user_id, {}).get("total", 0.0)
+        return estimated_cost <= (budget - spent)
 
-    def add_cost(self, user_id: str, role: str, cost: float):
-        """Record cost for user.
-
-        TODO: Update user_spending
-        1. If user_id not in dict, create entry with role and total=0
-        2. Add cost to user's total
-        """
-        # TODO: implement
-        pass
-
-    def can_afford_query(self, user_id: str, estimated_cost: float) -> bool:
-        """Check if user has budget remaining.
-
-        TODO: Check budget
-        1. Get user's role and budget
-        2. Get user's spending so far
-        3. Calculate remaining: budget - spending
-        4. Return True if estimated_cost <= remaining
-
-        Note: if user_id is not yet in user_spending, you have no role to look up their budget.
-        One approach: add role as a parameter here, similar to add_cost().
-        """
-        # TODO: implement
-        return True
-
-    def get_budget_remaining(self, user_id: str) -> float:
-        """Get remaining budget for user.
-
-        TODO: Calculate and return
-        - budget - (user's total spending)
-        - Return 0 if negative
-        """
-        # TODO: implement
-        return 0.0
+    def get_budget_remaining(self, user_id: str, role: str = None) -> float:
+        """Remaining budget for a user (never negative)."""
+        budget = self._budget_for(user_id, role)
+        spent = self.user_spending.get(user_id, {}).get("total", 0.0)
+        return max(0.0, budget - spent)
 
 
 # ============================================================================
-# TASK 4: Integrate with Week 5 Agent
+# TASK 5: Tests (run with: python3 access_control_starter.py)
 # ============================================================================
-
-# Once you have implemented the three classes above, open your copied
-# app_starter.py and update the Agent class to use them:
-#
-# 1. In Agent.__init__, add:
-#       self.access_controller = AccessController("data/access_control.json")
-#       self.rate_limiter = RateLimiter(max_queries_per_minute=30)
-#       self.cost_enforcer = CostEnforcer()
-#
-# 2. Update Agent.query() to accept user_id and user_role parameters:
-#       def query(self, user_query: str, user_id: str, user_role: str = "engineer")
-#
-# 3. At the start of query(), add guardrail checks:
-#       if not self.rate_limiter.is_allowed(user_id):
-#           return {"error": "Rate limit exceeded"}
-#       if not self.cost_enforcer.can_afford_query(user_id, estimated_cost=0.01):
-#           return {"error": "Budget exceeded"}
-#
-# 4. After getting the LLM answer, redact sensitive fields:
-#       answer = self.access_controller.redact_response(user_role, answer)
-#
-# 5. After each query, track actual cost:
-#       self.cost_enforcer.add_cost(user_id, user_role, actual_cost)
-
-
-# ============================================================================
-# TASK 5: Test Your Implementation
-# ============================================================================
-
-# A basic test suite is provided below to help you verify your implementation.
-# Run it with: python3 access_control_starter.py
-# You are free to modify or extend these tests as you see fit.
 
 if __name__ == "__main__":
     """Quick test of access control functionality."""
@@ -272,6 +297,16 @@ if __name__ == "__main__":
     ), "Engineer should only see Public doc"
     print("  filter_documents: PASSED")
 
+    # redact_response: value gone, field name kept (TROUBLESHOOTING example)
+    redacted = controller.redact_response("engineer", "Employee salary: $100,000")
+    assert "salary" in redacted.lower() and "$100,000" not in redacted, (
+        f"Salary value should be redacted, got: {redacted}"
+    )
+    assert controller.redact_response("hr", "Employee salary: $100,000") == (
+        "Employee salary: $100,000"
+    ), "HR answer should not be redacted"
+    print("  redact_response: PASSED")
+
     # Test RateLimiter
     print("\nTesting RateLimiter...")
     limiter = RateLimiter(max_queries_per_minute=3)
@@ -279,6 +314,7 @@ if __name__ == "__main__":
     assert limiter.is_allowed("user1"), "Second query should be allowed"
     assert limiter.is_allowed("user1"), "Third query should be allowed"
     assert not limiter.is_allowed("user1"), "Fourth query should be blocked"
+    assert limiter.get_remaining_queries("user1") == 0, "No queries should remain"
     print("  is_allowed: PASSED")
 
     # Test CostEnforcer
@@ -294,6 +330,7 @@ if __name__ == "__main__":
     assert not enforcer.can_afford_query(
         "user1", 51.0
     ), "Should not afford $51 with $50 remaining"
+    assert enforcer.get_budget_remaining("user1") == 50.0, "Should have $50 remaining"
     print("  can_afford_query: PASSED")
 
     print("\nAll tests passed!")
